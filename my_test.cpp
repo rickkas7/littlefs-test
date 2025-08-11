@@ -56,6 +56,135 @@ struct lfs_dir *lfs_new_dir(void) {
 }
 
 
+typedef size_t fsblkcnt_t;
+typedef size_t fsfilcnt_t;
+
+struct statvfs {
+    unsigned long  f_bsize;    /* file system block size */
+    unsigned long  f_frsize;   /* fragment size */
+    fsblkcnt_t     f_blocks;   /* size of fs in f_frsize units */
+    fsblkcnt_t     f_bfree;    /* # free blocks */
+    fsblkcnt_t     f_bavail;   /* # free blocks for unprivileged users */
+    fsfilcnt_t     f_files;    /* # inodes */
+    fsfilcnt_t     f_ffree;    /* # free inodes */
+    fsfilcnt_t     f_favail;   /* # free inodes for unprivileged users */
+    unsigned long  f_fsid;     /* file system ID */
+    unsigned long  f_flag;     /* mount flags */
+    unsigned long  f_namemax;  /* maximum filename length */
+};
+
+int statvfs(const char* path, struct statvfs* s)
+{
+    (void)path;
+
+    if (!s) {
+        return -1;
+    }
+
+
+    size_t inUse = 0;
+
+    int r = lfs_traverse(&fsInstance, [](void* p, lfs_block_t b) -> int {
+        size_t* inUse = (size_t*)p;
+        ++(*inUse);
+        return 0;
+    }, &inUse);
+
+    if (r) {
+        return r;
+    }
+
+    memset(s, 0, sizeof(*s));
+
+    s->f_bsize = s->f_frsize = fsConfig.block_size;
+    s->f_blocks = fsConfig.block_count;
+    s->f_bfree = s->f_bavail = s->f_blocks - inUse;
+    s->f_namemax = LFS_NAME_MAX;
+
+    return 0;
+}
+
+void fs_dump_dir(char* path, size_t len)
+{
+    lfs_dir_t dir = {};
+    int r = lfs_dir_open(&fsInstance, &dir, path);
+    size_t pathLen = strnlen(path, len);
+
+    if (r) {
+        return;
+    }
+
+    printf("%s:\r\n", path);
+
+    struct lfs_info info = {};
+    while (true) {
+        r = lfs_dir_read(&fsInstance, &dir, &info);
+        if (r != 1) {
+            break;
+        }
+        printf("%crw-rw-rw- %8lu %s\r\n", info.type == LFS_TYPE_REG ? '-' : 'd', info.size, info.name);
+    }
+
+    printf("\r\n", path);
+
+    r = lfs_dir_rewind(&fsInstance, &dir);
+
+    while (true) {
+        r = lfs_dir_read(&fsInstance, &dir, &info);
+        if (r != 1) {
+            break;
+        }
+        /* Restore path */
+        path[pathLen] = '\0';
+        if (info.type == LFS_TYPE_DIR && info.name[0] != '.') {
+            int plen = snprintf(path + pathLen, len - pathLen, "%s%s", pathLen != 1 ? "/" : "", info.name);
+            if (plen >= (int)(len - pathLen)) {
+                /* Didn't fit */
+                continue;
+            }
+
+            fs_dump_dir(path, len);
+        }
+    }
+
+
+    lfs_dir_close(&fsInstance, &dir);
+}
+
+void fs_dump()
+{
+    struct statvfs svfs;
+    int r = statvfs(nullptr, &svfs);
+
+    if (!r) {
+        printf("%-11s %11s %7s %4s %5s %8s %8s %8s  %4s\r\n",
+            "Filesystem",
+            "Block size",
+            "Blocks",
+            "Used",
+            "Avail",
+            "Size",
+            "Used",
+            "Avail",
+            "Use%");
+        printf("%-11s %11lu %7lu %4lu %5lu %8lu %8lu %8lu %4lu%%\r\n\r\n",
+            "littlefs",
+            svfs.f_bsize,
+            svfs.f_blocks,
+            svfs.f_blocks - svfs.f_bfree,
+            svfs.f_bfree,
+            svfs.f_bsize * svfs.f_blocks,
+            svfs.f_bsize * (svfs.f_blocks - svfs.f_bfree),
+            svfs.f_bsize * svfs.f_bfree,
+            (unsigned long)(100.0f - (((float)svfs.f_bfree / (float)svfs.f_blocks) * 100)));
+    }
+
+    /* Recursively traverse directories */
+    char tmpbuf[(LFS_NAME_MAX + 1) * 2] = {};
+    tmpbuf[0] = '/';
+    fs_dump_dir(tmpbuf, sizeof(tmpbuf));
+}
+
 extern "C"
 int main(int argc, char *argv[]) {
     FILE *fd = fopen("fs_corrupted.bin", "r");
@@ -88,6 +217,12 @@ int main(int argc, char *argv[]) {
     int ret = lfs_mount(&fsInstance, &fsConfig);
     printf("lfs_mount %d\n", ret);
 
+    fs_dump();
+    /*
+    lfs_dir_t dir;
+    ret = lfs_dir_open(&fsInstance, &dir, "/sys");
+    printf("open sys %d\n", ret);
+    */
 
     ret = lfs_deorphan(&fsInstance);
     printf("lfs_deorphan %d\n", ret);
