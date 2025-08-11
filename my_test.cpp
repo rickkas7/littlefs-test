@@ -218,11 +218,40 @@ int main(int argc, char *argv[]) {
     printf("lfs_mount %d\n", ret);
 
     fs_dump();
-    /*
-    lfs_dir_t dir;
-    ret = lfs_dir_open(&fsInstance, &dir, "/sys");
-    printf("open sys %d\n", ret);
-    */
+
+    {
+        // Test read the DCT
+        lfs_file_t file;
+
+        ret = lfs_file_open(&fsInstance, &file, "sys/dct.bin", LFS_O_RDONLY);
+        if (ret >= 0) {
+            lfs_soff_t size = lfs_file_seek(&fsInstance, &file, 0, LFS_SEEK_END);
+
+            lfs_file_seek(&fsInstance, &file, 0, LFS_SEEK_SET);
+
+            if (size) {
+                char *buf = (char *)malloc(size);
+                if (buf) {
+                    ret = lfs_file_read(&fsInstance, &file, buf, size);
+                    if (ret == size) {
+                        printf("successfully read DCT\n");
+                    }
+                    else {
+                        printf("read DCT error %d\n", ret);
+                    }
+                }
+               free(buf);
+            }
+            else {
+                printf("DCT size was 0\n");
+            }
+
+            lfs_file_close(&fsInstance, &file);
+        }
+        else {
+            printf("failed to open DCT file %d\n", ret);
+        }
+    }
 
     ret = lfs_deorphan(&fsInstance);
     printf("lfs_deorphan %d\n", ret);
