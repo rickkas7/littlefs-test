@@ -2,6 +2,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <sys/stat.h>
+#include <dirent.h>
 
 #include "lfs.h"
 
@@ -11,8 +12,12 @@ struct lfs_config fsConfig;
 lfs_t fsInstance;
 unsigned char *fsData;
 size_t fsDataSize;
-char outputPath[(LFS_NAME_MAX + 1) * 2 + 20];
-size_t outputPathLen = 0;
+char localPath[(LFS_NAME_MAX + 1) * 2 + 20];
+size_t localPathLen = 0;
+const char *argFilename = 0;
+bool argModeAnalyze = false;
+bool argModeBuild = false;
+bool argExtractFilesystem = false;
 
 int myRead(const struct lfs_config *c, lfs_block_t block, lfs_off_t off, void *buffer, lfs_size_t size) {
 
@@ -23,7 +28,7 @@ int myRead(const struct lfs_config *c, lfs_block_t block, lfs_off_t off, void *b
 
 int myProg(const struct lfs_config *c, lfs_block_t block, lfs_off_t off, const void *buffer, lfs_size_t size) {
     for(size_t ii = 0; ii < size; ii++) {        
-        ((unsigned char *)buffer)[block * fsConfig.block_size + off + ii] &= fsData[block * fsConfig.block_size + off + ii];
+        fsData[block * fsConfig.block_size + off + ii] &= ((const unsigned char *)buffer)[ii];
     }
 
     return 0;
@@ -132,10 +137,10 @@ void fs_dump_dir(char* path, size_t len)
         printf("%crw-rw-rw- %8lu %s\n", info.type == LFS_TYPE_REG ? '-' : 'd', info.size, info.name);
 
         if (info.type == LFS_TYPE_REG) {
-            size_t savedOutputDirLen = strlen(outputPath);
+            size_t savedOutputDirLen = strlen(localPath);
 
-            strcat(outputPath, "/");
-            strcat(outputPath, info.name);
+            strcat(localPath, "/");
+            strcat(localPath, info.name);
 
             char sourcePath[(LFS_NAME_MAX + 1) * 2 + 20];
             strcpy(sourcePath, path);
@@ -157,10 +162,12 @@ void fs_dump_dir(char* path, size_t len)
                         if (ret == size) {
                             // printf("successfully read file\n");
 
-                            FILE *fd = fopen(outputPath, "w+");
-                            if (fd) {
-                                fwrite(buf, 1, size, fd);
-                                fclose(fd);
+                            if (argExtractFilesystem) {
+                                FILE *fd = fopen(localPath, "w+");
+                                if (fd) {
+                                    fwrite(buf, 1, size, fd);
+                                    fclose(fd);
+                                }
                             }
                         }
                         else {
@@ -171,9 +178,11 @@ void fs_dump_dir(char* path, size_t len)
                 }
                 else {
                     // printf("file size was 0 %s\n", sourcePath);
-                    FILE *fd = fopen(outputPath, "w+");
-                    if (fd) {
-                        fclose(fd);
+                    if (argExtractFilesystem) {
+                        FILE *fd = fopen(localPath, "w+");
+                        if (fd) {
+                            fclose(fd);
+                        }
                     }
                 }
 
@@ -183,7 +192,7 @@ void fs_dump_dir(char* path, size_t len)
                 printf("failed to open file %d %s\n", ret, sourcePath);
             }
         
-            outputPath[savedOutputDirLen] = 0;
+            localPath[savedOutputDirLen] = 0;
         }
 
     }
@@ -206,10 +215,12 @@ void fs_dump_dir(char* path, size_t len)
                 continue;
             }
 
-            outputPath[outputPathLen] = 0;
-            strcat(outputPath, "/");
-            strcat(outputPath, path);
-            mkdir(outputPath, 0777);
+            localPath[localPathLen] = 0;
+            strcat(localPath, "/");
+            strcat(localPath, path);
+            if (argExtractFilesystem) {
+                mkdir(localPath, 0777);
+            }
 
             fs_dump_dir(path, len);
         }
@@ -253,13 +264,10 @@ void fs_dump()
     fs_dump_dir(tmpbuf, sizeof(tmpbuf));
 }
 
-extern "C"
-int main(int argc, char *argv[]) {
-    if (argc != 2) {
-        printf("%s <filename> required\n");
-        return 1;
-    }
-    FILE *fd = fopen(argv[1], "r");
+int analyzeFs() {
+    printf("--analyze\n");
+
+    FILE *fd = fopen(argFilename, "r");
 
     fseek(fd, 0, SEEK_END);
     fsDataSize = ftell(fd);
@@ -271,9 +279,172 @@ int main(int argc, char *argv[]) {
 
     printf("read file system data %d bytes\n", (int)fsDataSize);
 
-    strcpy(outputPath, "filesystem");
-    outputPathLen = strlen(outputPath);
-    mkdir(outputPath, 0777);
+    fsConfig.block_count = fsDataSize / fsConfig.block_size;
+
+    int ret = lfs_mount(&fsInstance, &fsConfig);
+    printf("lfs_mount %d\n", ret);
+
+    fs_dump();
+
+    ret = lfs_deorphan(&fsInstance);
+    printf("lfs_deorphan %d\n", ret);
+
+    return ret;
+}
+
+
+int buildFsDir(char *relativePath) {
+
+    char localRelativePath[(LFS_NAME_MAX + 1) * 2];
+    strcpy(localRelativePath, localPath);
+    if (relativePath[strlen(relativePath) - 1] != '/') {
+        strcat(relativePath, "/");
+    }
+    strcat(localRelativePath, relativePath); 
+    size_t savedLocalRelativePathLen = strlen(localRelativePath);
+
+    printf("buildFsDir relativePath=%s localRelativePath=%s\n", relativePath, localRelativePath);
+
+    size_t savedRelativePathLen = strlen(relativePath);
+    
+    DIR *dirp = opendir(localRelativePath);
+    
+    while(true) {
+        struct dirent *de = readdir(dirp);
+        if (!de) {
+            break;
+        }
+
+        if (relativePath[strlen(relativePath) - 1] != '/') {
+            strcat(relativePath, "/");
+        }
+        strcat(relativePath, de->d_name);
+
+        if (de->d_type == DT_DIR) {
+            if (de->d_name[0] != '.') {
+
+                lfs_mkdir(&fsInstance, relativePath);
+
+                buildFsDir(relativePath);
+
+            }
+        }
+        else
+        if (de->d_type == DT_REG) {
+            if (localRelativePath[strlen(localRelativePath) - 1] != '/') {
+                strcat(localRelativePath, "/");
+            }
+            strcat(localRelativePath, de->d_name);
+
+            FILE *fd = fopen(localRelativePath, "r");
+            if (fd) {
+                fseek(fd, 0, SEEK_END);
+                size_t fileSize = ftell(fd);
+                fseek(fd, 0, SEEK_SET);
+
+                void *buf = 0;
+                if (fileSize > 0) {
+                    buf = malloc(fileSize);
+
+                    fread(buf, 1, fileSize, fd);
+                }
+
+                lfs_file_t file;
+
+                int ret = lfs_file_open(&fsInstance, &file, relativePath, LFS_O_RDWR | LFS_O_CREAT | LFS_O_TRUNC);
+                if (ret >= 0) {
+                    if (fileSize) {
+                        lfs_file_write(&fsInstance, &file, buf, fileSize);
+                    }
+                    lfs_file_close(&fsInstance, &file);
+                }
+                else {
+                    printf("failed to open %d %d", ret, relativePath);    
+                }
+                fclose(fd);
+            }
+
+
+            localRelativePath[savedLocalRelativePathLen] = 0;
+        }
+        
+        relativePath[savedRelativePathLen] = 0;
+        
+    }
+
+    closedir(dirp);
+    return 0;
+}
+
+int buildFs() {
+    int ret = 0;
+    
+    printf("--build\n");
+
+    // This is fixed at 2 MB, might make configurable to 4MB later
+    fsDataSize = 2048 * 1024;
+
+    fsData = (unsigned char *)malloc(fsDataSize);
+    memset(fsData, 0xff, fsDataSize);
+
+    fsConfig.block_count = fsDataSize / fsConfig.block_size;
+
+    ret = lfs_format(&fsInstance, &fsConfig);
+    printf("lfs_format %d\n", ret);
+
+    if (!ret) {
+        ret = lfs_mount(&fsInstance, &fsConfig);
+        printf("lfs_mount %d\n", ret);
+    }
+
+    char relativePath[(LFS_NAME_MAX + 1) * 2] = {0};
+    relativePath[0] = '/';
+
+    buildFsDir(relativePath);
+
+    fs_dump();
+
+    FILE *fd = fopen(argFilename, "w+");
+    fwrite(fsData, 1, fsDataSize, fd);
+    fclose(fd);
+
+
+    return ret;
+}
+
+extern "C"
+int main(int argc, char *argv[]) {
+    for(int ii = 1; ii < argc; ii++) {
+        if (argv[ii][0] == '-') {
+            if (strcmp(argv[ii], "--analyze") == 0) {
+                argModeAnalyze = true;
+                argModeBuild = false;
+            } 
+            else
+            if (strcmp(argv[ii], "--build") == 0) {
+                argModeAnalyze = false;
+                argModeBuild = true;
+            } 
+            else
+            if (strcmp(argv[ii], "--extract")== 0) {
+                argExtractFilesystem = true;
+            }
+        }
+        else {
+            if (argFilename) {
+                printf("%s <filename> only one filename allowed\n");
+                return 1;
+            }
+            argFilename = argv[ii];
+        }
+    }
+    if (!argFilename) {
+        printf("%s <filename> required\n");
+        return 1;
+    }
+    if (!argModeAnalyze && !argModeBuild) {
+        argModeAnalyze = true;
+    }
 
     memset(&fsConfig, 0, sizeof(struct lfs_config));
 
@@ -285,57 +456,26 @@ int main(int argc, char *argv[]) {
     fsConfig.read_size = 256; 
     fsConfig.prog_size = 256;
     fsConfig.block_size = 4096; // sFLASH_PAGESIZE
-    fsConfig.block_count = fsDataSize / fsConfig.block_size;
+    fsConfig.block_count = 0; // overridden in analyzeFs or buildFs
     fsConfig.lookahead = 128;
 
-
-    int ret = lfs_mount(&fsInstance, &fsConfig);
-    printf("lfs_mount %d\n", ret);
-
-    fs_dump();
-
-    {
-        // Test read the DCT
-        lfs_file_t file;
-
-        ret = lfs_file_open(&fsInstance, &file, "sys/dct.bin", LFS_O_RDONLY);
-        if (ret >= 0) {
-            lfs_soff_t size = lfs_file_seek(&fsInstance, &file, 0, LFS_SEEK_END);
-
-            lfs_file_seek(&fsInstance, &file, 0, LFS_SEEK_SET);
-
-            if (size) {
-                char *buf = (char *)malloc(size);
-                if (buf) {
-                    ret = lfs_file_read(&fsInstance, &file, buf, size);
-                    if (ret == size) {
-                        printf("successfully read DCT\n");
-                    }
-                    else {
-                        printf("read DCT error %d\n", ret);
-                    }
-                }
-               free(buf);
-            }
-            else {
-                printf("DCT size was 0\n");
-            }
-
-            lfs_file_close(&fsInstance, &file);
-        }
-        else {
-            printf("failed to open DCT file %d\n", ret);
-        }
-    }
-
-    ret = lfs_deorphan(&fsInstance);
-    printf("lfs_deorphan %d\n", ret);
-
-    if (ret) {
-        return ret;
+    strcpy(localPath, "./filesystem");
+    localPathLen = strlen(localPath);
+    struct stat sb;
+    if (stat(localPath, &sb)) {
+        mkdir(localPath, 0777);
     }
 
 
 
-    return 0;
+    int ret = 0;
+
+    if (argModeAnalyze) {        
+        ret = analyzeFs();
+    }
+    if (argModeBuild) {
+        ret = buildFs();
+    }
+
+    return ret;
 }
