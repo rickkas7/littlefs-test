@@ -1,13 +1,18 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <sys/stat.h>
 
 #include "lfs.h"
+
+// Typical usage: make my_test && ./my_test fs_corrupted.bin
 
 struct lfs_config fsConfig;
 lfs_t fsInstance;
 unsigned char *fsData;
 size_t fsDataSize;
+char outputPath[(LFS_NAME_MAX + 1) * 2 + 20];
+size_t outputPathLen = 0;
 
 int myRead(const struct lfs_config *c, lfs_block_t block, lfs_off_t off, void *buffer, lfs_size_t size) {
 
@@ -91,6 +96,7 @@ int statvfs(const char* path, struct statvfs* s)
     }, &inUse);
 
     if (r) {
+        printf("lfs_traverse failed %d\n", r);
         return r;
     }
 
@@ -111,10 +117,11 @@ void fs_dump_dir(char* path, size_t len)
     size_t pathLen = strnlen(path, len);
 
     if (r) {
+        printf("lfs_dir_open failed %d %s\n", r, path);
         return;
     }
 
-    printf("%s:\r\n", path);
+    printf("%s:\n", path);
 
     struct lfs_info info = {};
     while (true) {
@@ -122,10 +129,66 @@ void fs_dump_dir(char* path, size_t len)
         if (r != 1) {
             break;
         }
-        printf("%crw-rw-rw- %8lu %s\r\n", info.type == LFS_TYPE_REG ? '-' : 'd', info.size, info.name);
+        printf("%crw-rw-rw- %8lu %s\n", info.type == LFS_TYPE_REG ? '-' : 'd', info.size, info.name);
+
+        if (info.type == LFS_TYPE_REG) {
+            size_t savedOutputDirLen = strlen(outputPath);
+
+            strcat(outputPath, "/");
+            strcat(outputPath, info.name);
+
+            char sourcePath[(LFS_NAME_MAX + 1) * 2 + 20];
+            strcpy(sourcePath, path);
+            strcat(sourcePath, "/");
+            strcat(sourcePath, info.name);
+    
+            lfs_file_t file;
+
+            int ret = lfs_file_open(&fsInstance, &file, sourcePath, LFS_O_RDONLY);
+            if (ret >= 0) {
+                lfs_soff_t size = lfs_file_seek(&fsInstance, &file, 0, LFS_SEEK_END);
+
+                lfs_file_seek(&fsInstance, &file, 0, LFS_SEEK_SET);
+
+                if (size) {
+                    char *buf = (char *)malloc(size);
+                    if (buf) {
+                        ret = lfs_file_read(&fsInstance, &file, buf, size);
+                        if (ret == size) {
+                            // printf("successfully read file\n");
+
+                            FILE *fd = fopen(outputPath, "w+");
+                            if (fd) {
+                                fwrite(buf, 1, size, fd);
+                                fclose(fd);
+                            }
+                        }
+                        else {
+                            printf("file error %d %s\n", ret, sourcePath);
+                        }
+                    }
+                    free(buf);
+                }
+                else {
+                    // printf("file size was 0 %s\n", sourcePath);
+                    FILE *fd = fopen(outputPath, "w+");
+                    if (fd) {
+                        fclose(fd);
+                    }
+                }
+
+                lfs_file_close(&fsInstance, &file);
+            }
+            else {
+                printf("failed to open file %d %s\n", ret, sourcePath);
+            }
+        
+            outputPath[savedOutputDirLen] = 0;
+        }
+
     }
 
-    printf("\r\n", path);
+    printf("\n");
 
     r = lfs_dir_rewind(&fsInstance, &dir);
 
@@ -143,6 +206,11 @@ void fs_dump_dir(char* path, size_t len)
                 continue;
             }
 
+            outputPath[outputPathLen] = 0;
+            strcat(outputPath, "/");
+            strcat(outputPath, path);
+            mkdir(outputPath, 0777);
+
             fs_dump_dir(path, len);
         }
     }
@@ -157,7 +225,7 @@ void fs_dump()
     int r = statvfs(nullptr, &svfs);
 
     if (!r) {
-        printf("%-11s %11s %7s %4s %5s %8s %8s %8s  %4s\r\n",
+        printf("%-11s %11s %7s %4s %5s %8s %8s %8s  %4s\n",
             "Filesystem",
             "Block size",
             "Blocks",
@@ -167,7 +235,7 @@ void fs_dump()
             "Used",
             "Avail",
             "Use%");
-        printf("%-11s %11lu %7lu %4lu %5lu %8lu %8lu %8lu %4lu%%\r\n\r\n",
+        printf("%-11s %11lu %7lu %4lu %5lu %8lu %8lu %8lu %4lu%%\n\n",
             "littlefs",
             svfs.f_bsize,
             svfs.f_blocks,
@@ -187,7 +255,11 @@ void fs_dump()
 
 extern "C"
 int main(int argc, char *argv[]) {
-    FILE *fd = fopen("fs_corrupted.bin", "r");
+    if (argc != 2) {
+        printf("%s <filename> required\n");
+        return 1;
+    }
+    FILE *fd = fopen(argv[1], "r");
 
     fseek(fd, 0, SEEK_END);
     fsDataSize = ftell(fd);
@@ -197,8 +269,11 @@ int main(int argc, char *argv[]) {
     fread(fsData, 1, fsDataSize, fd);
     fclose(fd);
 
-    printf("read data %d bytes\n", (int)fsDataSize);
+    printf("read file system data %d bytes\n", (int)fsDataSize);
 
+    strcpy(outputPath, "filesystem");
+    outputPathLen = strlen(outputPath);
+    mkdir(outputPath, 0777);
 
     memset(&fsConfig, 0, sizeof(struct lfs_config));
 
@@ -210,7 +285,7 @@ int main(int argc, char *argv[]) {
     fsConfig.read_size = 256; 
     fsConfig.prog_size = 256;
     fsConfig.block_size = 4096; // sFLASH_PAGESIZE
-    fsConfig.block_count = 512; // 2 MB
+    fsConfig.block_count = fsDataSize / fsConfig.block_size;
     fsConfig.lookahead = 128;
 
 

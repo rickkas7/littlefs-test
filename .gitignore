@@ -3,3 +3,5 @@
 lfs.a
 *.d
 my_test
+filesystem
+fs*.bin
