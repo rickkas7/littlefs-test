@@ -2,6 +2,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <sys/stat.h>
+#include <dirent.h>
 
 #include "lfs.h"
 
@@ -13,6 +14,9 @@ unsigned char *fsData;
 size_t fsDataSize;
 char outputPath[(LFS_NAME_MAX + 1) * 2 + 20];
 size_t outputPathLen = 0;
+const char *argFilename = 0;
+bool argModeAnalyze = false;
+bool argModeBuild = false;
 
 int myRead(const struct lfs_config *c, lfs_block_t block, lfs_off_t off, void *buffer, lfs_size_t size) {
 
@@ -23,7 +27,7 @@ int myRead(const struct lfs_config *c, lfs_block_t block, lfs_off_t off, void *b
 
 int myProg(const struct lfs_config *c, lfs_block_t block, lfs_off_t off, const void *buffer, lfs_size_t size) {
     for(size_t ii = 0; ii < size; ii++) {        
-        ((unsigned char *)buffer)[block * fsConfig.block_size + off + ii] &= fsData[block * fsConfig.block_size + off + ii];
+        fsData[block * fsConfig.block_size + off + ii] &= ((const unsigned char *)buffer)[ii];
     }
 
     return 0;
@@ -253,13 +257,10 @@ void fs_dump()
     fs_dump_dir(tmpbuf, sizeof(tmpbuf));
 }
 
-extern "C"
-int main(int argc, char *argv[]) {
-    if (argc != 2) {
-        printf("%s <filename> required\n");
-        return 1;
-    }
-    FILE *fd = fopen(argv[1], "r");
+int analyzeFs() {
+    printf("--analyze\n");
+
+    FILE *fd = fopen(argFilename, "r");
 
     fseek(fd, 0, SEEK_END);
     fsDataSize = ftell(fd);
@@ -275,19 +276,7 @@ int main(int argc, char *argv[]) {
     outputPathLen = strlen(outputPath);
     mkdir(outputPath, 0777);
 
-    memset(&fsConfig, 0, sizeof(struct lfs_config));
-
-    fsConfig.read = myRead;
-    fsConfig.prog = myProg;
-    fsConfig.erase = myErase;
-    fsConfig.sync = mySync;
-    // from hal/src/nRF52840/littlefs/filesystem_impl.h
-    fsConfig.read_size = 256; 
-    fsConfig.prog_size = 256;
-    fsConfig.block_size = 4096; // sFLASH_PAGESIZE
     fsConfig.block_count = fsDataSize / fsConfig.block_size;
-    fsConfig.lookahead = 128;
-
 
     int ret = lfs_mount(&fsInstance, &fsConfig);
     printf("lfs_mount %d\n", ret);
@@ -331,11 +320,90 @@ int main(int argc, char *argv[]) {
     ret = lfs_deorphan(&fsInstance);
     printf("lfs_deorphan %d\n", ret);
 
-    if (ret) {
-        return ret;
+    return ret;
+}
+
+int buildFs() {
+    int ret = 0;
+    
+    printf("--build\n");
+
+    // This is fixed at 2 MB, might make configurable to 4MB later
+    fsDataSize = 2048 * 1024;
+
+    fsData = (unsigned char *)malloc(fsDataSize);
+    memset(fsData, 0xff, fsDataSize);
+
+    fsConfig.block_count = fsDataSize / fsConfig.block_size;
+
+    ret = lfs_format(&fsInstance, &fsConfig);
+    printf("lfs_format %d\n", ret);
+
+    if (!ret) {
+        ret = lfs_mount(&fsInstance, &fsConfig);
+        printf("lfs_mount %d\n", ret);
     }
 
+    FILE *fd = fopen(argFilename, "w+");
+    fwrite(fsData, 1, fsDataSize, fd);
+    fclose(fd);
 
 
-    return 0;
+    return ret;
+}
+
+extern "C"
+int main(int argc, char *argv[]) {
+    for(int ii = 1; ii < argc; ii++) {
+        if (argv[ii][0] == '-') {
+            if (strcmp(argv[ii], "--analyze") == 0) {
+                argModeAnalyze = true;
+                argModeBuild = false;
+            } 
+            else
+            if (strcmp(argv[ii], "--build") == 0) {
+                argModeAnalyze = false;
+                argModeBuild = true;
+            } 
+        }
+        else {
+            if (argFilename) {
+                printf("%s <filename> only one filename allowed\n");
+                return 1;
+            }
+            argFilename = argv[ii];
+        }
+    }
+    if (!argFilename) {
+        printf("%s <filename> required\n");
+        return 1;
+    }
+    if (!argModeAnalyze && !argModeBuild) {
+        argModeAnalyze = true;
+    }
+
+    memset(&fsConfig, 0, sizeof(struct lfs_config));
+
+    fsConfig.read = myRead;
+    fsConfig.prog = myProg;
+    fsConfig.erase = myErase;
+    fsConfig.sync = mySync;
+    // from hal/src/nRF52840/littlefs/filesystem_impl.h
+    fsConfig.read_size = 256; 
+    fsConfig.prog_size = 256;
+    fsConfig.block_size = 4096; // sFLASH_PAGESIZE
+    fsConfig.block_count = 0; // overridden in analyzeFs or buildFs
+    fsConfig.lookahead = 128;
+
+
+    int ret = 0;
+
+    if (argModeAnalyze) {
+        ret = analyzeFs();
+    }
+    if (argModeBuild) {
+        ret = buildFs();
+    }
+
+    return ret;
 }
