@@ -6,12 +6,18 @@ to test and dump the contents of a saved binary copy of the file system on a dev
 To run:
 
 ```
-make my_test && ./my_test fs.bin
+make my_test && ./my_test --analyze fs.bin
 ```
 
 fs.bin is a dump of the file system on a Particle device.
 
-It extracts the contents into the directory `filesystem` in this directory.
+## Extract file system contents
+
+By adding the --extract option to --analyze, the tool extracts the contents into the directory `filesystem` in this directory.
+
+```
+make my_test && ./my_test --analyze --extract fs.bin
+```
 
 ## Getting a file system binary file
 
@@ -29,3 +35,12 @@ dd bs=1024 count=2048 if=qspi.bin of=fs.bin
 ```
 
 The 0x200000 is 0x400000, and the 2048 is 4096, on the Tracker which has a 4 MB file system instead of 2 MB.
+
+## Generating a file system
+
+If you create a directory of files in the `filesystem` directory you can build a LittleFS file system file from it.
+
+```
+make my_test && ./my_test --build fs_new.bin
+```
+
